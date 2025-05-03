@@ -2194,7 +2194,7 @@ class AShareMarket:
 
         return data
 
-   def calc_at(self):
+    def calc_AT(self):
         """
         计算年末资产总额（AT）。
         使用 FS_Combas 表中的 'A001000000' 字段（资产总计），年度频率。
@@ -2205,7 +2205,7 @@ class AShareMarket:
         at_monthly = at_annual.reindex(self.monthly_ret.index, method='ffill')
         return at_monthly
 
-   def calc_lme(self):
+    def calc_LME(self):
         """
         计算上月末市值（LME）。
         使用 TRD_Mnth 表中的 'Msmvosd' 字段（流通市值，单位：千元）。
@@ -2214,7 +2214,7 @@ class AShareMarket:
         # 转换为元单位（千元 * 1000 = 元）
         return mv * 1000
 
-   def calc_c(self):
+    def calc_C(self):
         """
         现金比率（C 因子）：
         C = （现金 + 短期投资）/ 总资产
@@ -2234,18 +2234,18 @@ class AShareMarket:
         c_ratio = (cash + st_inv) / total_assets
         return c_ratio
 
-   def calc_a2me(self):
+    def calc_A2ME(self):
         """
         计算资产市值比（A2ME）：
         A2ME = AT_{t-1} / LME_{t-1}
         """
         # 资产总额滞后一期
-        at = self.calc_at().shift(1)
+        at = self.calc_AT().shift(1)
         # 市值滞后一期
-        mc = self.calc_lme().shift(1)
+        mc = self.calc_LME().shift(1)
         return at / mc
 
-   def calc_lturnover(self):
+    def calc_LTurnover(self):
         """
         Monthly Turnover approximated as:
         上月月度成交量 / (月末浮动市值*1000 / 月末收盘价)
@@ -2262,7 +2262,7 @@ class AShareMarket:
         turnover = vol / shares_out
         return turnover
 
-   def calc_st_rev(self):
+    def calc_ST_Rev(self):
         """
         计算月度换手率（LTurnover），近似公式：
         上月月度成交量 / （月末流通市值*1000 / 月末收盘价）
@@ -2270,7 +2270,7 @@ class AShareMarket:
         # 将月度收益率整体向后移一位
         return self.monthly_ret.shift(1)
 
-   def calc_rel2high(self):
+    def calc_Rel2High(self):
         """
         计算接近过去一年高点的程度（Rel2High）：
         上月末可比收盘价 / 过去 240 个交易日内最高价
@@ -2295,7 +2295,7 @@ class AShareMarket:
         rel2high.index.name = 'Trdmnt'
         return rel2high
 
-   def calc_variance(self):
+    def calc_Variance(self):
         """
         计算过去两个月（约 40 个交易日）日度收益率的样本方差（Variance）。
         """
@@ -2366,7 +2366,7 @@ total : 118
 # chars_list = characters_copy
 
 # chars_list = ['size',  'turnm', 'turnq', 'turna']
-chars_list = ['at', 'lme', 'c', 'a2me','lturnover', 'st_rev', 'rel2high', 'variance']
+chars_list = ['AT', 'LME', 'C', 'A2ME','lturnover', 'AT_Rev', 'Rel2High', 'Variance']
 
 import time
 print(len(chars_list))
