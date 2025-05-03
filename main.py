@@ -2194,6 +2194,123 @@ class AShareMarket:
 
         return data
 
+   def calc_at(self):
+        """
+        计算年末资产总额（AT）。
+        使用 FS_Combas 表中的 'A001000000' 字段（资产总计），年度频率。
+        """
+        # 读取年度资产总计数据，索引为 YYYYMM（例如 '202012' 表示 2020 年）
+        at_annual = self.get_data('FS_Combas', 'A001000000', fs_freq='y')
+        # 将年度数据向前填充，扩展到每个月度索引
+        at_monthly = at_annual.reindex(self.monthly_ret.index, method='ffill')
+        return at_monthly
+
+   def calc_lme(self):
+        """
+        计算上月末市值（LME）。
+        使用 TRD_Mnth 表中的 'Msmvosd' 字段（流通市值，单位：千元）。
+        """
+        mv = self.get_data('TRD_Mnth', 'Msmvosd')
+        # 转换为元单位（千元 * 1000 = 元）
+        return mv * 1000
+
+   def calc_c(self):
+        """
+        现金比率（C 因子）：
+        C = （现金 + 短期投资）/ 总资产
+        其中：
+        - 现金：FS_Combas 表字段 'A001101000'（现金及存放中央银行款项等）
+        - 短期投资：FS_Combas 表字段 'A001109000'（短期投资）
+        - 总资产：FS_Combas 表字段 'A001000000'（资产总计）
+        返回值是一个按月索引、各股票代码为列的 DataFrame。
+        """
+        # 从季度财报中读取“现金”数据（默认 fs_freq='q' 会对齐到每月末，并向前填充）
+        cash = self.get_data('FS_Combas', 'A001101000')
+        # 从季度财报中读取“短期投资”数据
+        st_inv = self.get_data('FS_Combas', 'A001109000')
+        # 从季度财报中读取“总资产”数据
+        total_assets = self.get_data('FS_Combas', 'A001000000')
+        # 计算现金及短期投资占总资产的比率
+        c_ratio = (cash + st_inv) / total_assets
+        return c_ratio
+
+   def calc_a2me(self):
+        """
+        计算资产市值比（A2ME）：
+        A2ME = AT_{t-1} / LME_{t-1}
+        """
+        # 资产总额滞后一期
+        at = self.calc_at().shift(1)
+        # 市值滞后一期
+        mc = self.calc_lme().shift(1)
+        return at / mc
+
+   def calc_lturnover(self):
+        """
+        Monthly Turnover approximated as:
+        上月月度成交量 / (月末浮动市值*1000 / 月末收盘价)
+        """
+        # 月度成交量（股）
+        vol = self.get_data('TRD_Mnth', 'Mnshrtrd')
+        # 月末流通市值（千元）→ 元
+        mv = self.get_data('TRD_Mnth', 'Msmvosd') * 1000
+        # 月末收盘价（元/股）
+        price = self.get_data('TRD_Mnth', 'Mclsprc')
+        # 近似计算流通股数 = 流通市值 / 收盘价
+        shares_out = mv / price
+        # 换手率 = 成交量 / 流通股数
+        turnover = vol / shares_out
+        return turnover
+
+   def calc_st_rev(self):
+        """
+        计算月度换手率（LTurnover），近似公式：
+        上月月度成交量 / （月末流通市值*1000 / 月末收盘价）
+        """
+        # 将月度收益率整体向后移一位
+        return self.monthly_ret.shift(1)
+
+   def calc_rel2high(self):
+        """
+        计算接近过去一年高点的程度（Rel2High）：
+        上月末可比收盘价 / 过去 240 个交易日内最高价
+        """
+        # 获取所有日度可比收盘价
+        price = self.get_data('TRD_Dalyr', 'Adjprcwd')
+        # 增加月份索引（前 6 字符 YYYYMM）
+        price['Trdmnt'] = price.index.str[:6]
+        # 按月取当月最后一个交易日的可比收盘价
+        price_month = price.groupby('Trdmnt').last()
+
+        # 获取所有日度最高价
+        daily_hi = self.get_data('TRD_Dalyr', 'Hiprc')
+        # 计算过去 240 日的滚动最高价（至少 200 个有效观测）
+        rolling_hi = daily_hi.rolling(window=240, min_periods=200).max()
+        rolling_hi['Trdmnt'] = rolling_hi.index.str[:6]
+        # 按月取当月最后一个交易日的滚动最高价
+        hi_month = rolling_hi.groupby('Trdmnt').last()
+
+        # 计算比值：当月末收盘价 / 过去一年高点
+        rel2high = price_month / hi_month
+        rel2high.index.name = 'Trdmnt'
+        return rel2high
+
+   def calc_variance(self):
+        """
+        计算过去两个月（约 40 个交易日）日度收益率的样本方差（Variance）。
+        """
+        # 获取日度考虑红利再投资的回报率
+        daily_ret = self.get_data('TRD_Dalyr', 'Dretwd')
+        # 计算滚动窗口方差（窗口 40 日，至少 20 个有效观测）
+        var = daily_ret.rolling(window=40, min_periods=20).var()
+        var['Trdmnt'] = var.index.str[:6]
+        # 按月取当月最后交易日的样本方差
+        var_month = var.groupby('Trdmnt').last()
+        var_month.index.name = 'Trdmnt'
+        return var_month
+
+
+
 # end class
 
 # ##############################################################################
@@ -2248,12 +2365,12 @@ total : 118
 # #去除掉中国版四因子
 # chars_list = characters_copy
 
-chars_list = ['size',  'turnm', 'turnq', 'turna']
-
+# chars_list = ['size',  'turnm', 'turnq', 'turna']
+chars_list = ['at', 'lme', 'c', 'a2me','lturnover', 'st_rev', 'rel2high', 'variance']
 
 import time
 print(len(chars_list))
-mytest = AShareMarket('local')
+mytest = AShareMarket('local',local_data_path='stocks_raw/')
 counter = 0
 start_time = time.time()  # 记录开始时间
 for char in chars_list[:]:
