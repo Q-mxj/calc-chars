@@ -2366,7 +2366,7 @@ total : 118
 # chars_list = characters_copy
 
 # chars_list = ['size',  'turnm', 'turnq', 'turna']
-chars_list = ['AT', 'LME', 'C', 'A2ME','lturnover', 'AT_Rev', 'Rel2High', 'Variance']
+chars_list = ['AT', 'LME', 'C', 'A2ME','LTurnover', 'ST_Rev', 'Rel2High', 'Variance']
 
 import time
 print(len(chars_list))
