@@ -2309,6 +2309,379 @@ class AShareMarket:
         var_month.index.name = 'Trdmnt'
         return var_month
 
+    def calc_Spread(self):
+        """
+        计算买卖价差（Bid-ask spread）：
+        上个月平均日度买卖价差
+        Spread = (1/N) * Σ(Ask Price_i - Bid Price_i)
+
+        注意：CSMAR数据中可能没有直接的买卖价数据，这里使用替代方法
+        用最高价和最低价的差来近似买卖价差
+        """
+        # 获取日度最高价和最低价
+        high_price = self.get_data('TRD_Dalyr', 'Hiprc')
+        low_price = self.get_data('TRD_Dalyr', 'Loprc')
+
+        # 计算日度价差
+        daily_spread = high_price - low_price
+
+        # 按月计算平均价差
+        daily_spread['Trdmnt'] = daily_spread.index.str[:6]
+
+        # 按月分组计算平均值
+        spread_monthly = daily_spread.groupby('Trdmnt').mean()
+
+        return spread_monthly
+
+    def calc_LT_Rev(self):
+        """
+        计算长期反转（Long-term reversal）：
+        从60个月前到13个月前的累积收益率
+        (Price_{t-60} - Price_{t-13}) / Price_{t-13} × 100%
+
+        这里使用月度收益率来计算累积收益率
+        """
+        monthly_ret = self.monthly_ret.copy()
+
+        # 计算从第60个月前到第13个月前的累积收益率
+        lt_rev = monthly_ret.copy()
+        lt_rev.iloc[:, :] = np.nan
+
+        for i in range(60, len(monthly_ret)):
+            # 计算从t-60到t-13的累积收益率
+            start_idx = i - 60
+            end_idx = i - 13 + 1  # +1因为要包含t-13期
+
+            if end_idx > start_idx:
+                # 计算累积收益率 = (1+r1)*(1+r2)*...*(1+rn) - 1
+                period_returns = monthly_ret.iloc[start_idx:end_idx]
+
+                # 计算累积收益率
+                cumulative_ret = (1 + period_returns).prod() - 1
+                lt_rev.iloc[i] = cumulative_ret
+
+        return lt_rev
+
+    def calc_Resid_Var(self):
+        """
+        计算残差方差（Residual Variance）：
+        过去两个月股票超额收益率对Fama-French三因子模型回归的残差方差
+        R_i,t = α_i + β_MKT,i * R_MKT,t + β_SMB,i * SMB_t + β_HML,i * HML_t + ε_i,t
+        """
+        # 获取日度收益率
+        daily_ret = self.get_data('TRD_Dalyr', 'Dretwd')
+        # 获取三因子数据
+        ff3 = self.get_data('STK_MKT_THRFACDAY')
+        # 获取无风险利率
+        rf = self.get_data('TRD_Nrrate', 'Nrrdaydt')
+
+        # 合并三因子和无风险利率
+        ff3_and_rf = ff3.merge(rf, on=['Trddt'])
+
+        # 计算超额收益率
+        excess_ret = daily_ret.copy()
+        for date in daily_ret.index:
+            rf_row = ff3_and_rf[ff3_and_rf['Trddt'] == date]
+            if len(rf_row) > 0:
+                rf_value = rf_row['Nrrdaydt'].iloc[0]
+                excess_ret.loc[date] = daily_ret.loc[date] - rf_value
+            else:
+                excess_ret.loc[date] = np.nan
+
+        # 计算残差方差
+        resid_var = excess_ret.copy()
+        resid_var.iloc[:, :] = np.nan
+        resid_var['Trdmnt'] = resid_var.index.str[:6]
+        resid_var.drop_duplicates(subset=['Trdmnt'], keep='last', inplace=True)
+
+        window = 40  # 两个月约40个交易日
+        min_periods = 20  # 最少20个观测
+
+        # 准备三因子数据
+        factor_dict = {}
+        for _, row in ff3_and_rf.iterrows():
+            factor_dict[row['Trddt']] = [row['RiskPremium1'], row['SMB1'], row['HML1']]
+
+        for i, month_end in enumerate(resid_var.index):
+            daily_pos = list(daily_ret.index).index(month_end)
+
+            if daily_pos >= window:
+                start_pos = daily_pos - window
+                end_pos = daily_pos
+
+                for j in range(resid_var.shape[1] - 1):  # 排除Trdmnt列
+                    # 获取窗口内的股票超额收益率
+                    y = excess_ret.iloc[start_pos:end_pos, j].dropna()
+
+                    if len(y) >= min_periods:
+                        # 获取对应日期的三因子数据
+                        x_data = []
+                        y_data = []
+
+                        for date in y.index:
+                            if date in factor_dict:
+                                x_data.append(factor_dict[date])
+                                y_data.append(y[date])
+
+                        if len(x_data) >= min_periods:
+                            x_array = np.array(x_data)
+                            y_array = np.array(y_data)
+
+                            # 添加常数项
+                            x_with_const = sm.add_constant(x_array)
+
+                            try:
+                                # 回归
+                                model = sm.OLS(y_array, x_with_const).fit()
+                                # 计算残差方差
+                                residuals = model.resid
+                                resid_variance = np.var(residuals, ddof=1)
+                                resid_var.iloc[i, j] = resid_variance
+                            except:
+                                continue
+
+        resid_var.set_index('Trdmnt', inplace=True)
+        return resid_var
+
+    def calc_MktBeta(self, min_month_num=24):
+        """
+        计算Market Beta：
+        过去60个月（最少24个月）股票超额收益率对市场超额收益率的回归系数
+        R_i,t = α_i,t + β_i,t * R_MKT,t + ε_i,t
+        """
+        # 获取月度收益率数据
+        monthly_ret = self.monthly_ret.copy()
+        ff3 = self.get_data('STK_MKT_THRFACDAY')
+        rf = self.get_data('TRD_Nrrate', 'Nrrdaydt')
+
+        # 准备市场超额收益率
+        ff3_and_rf = ff3.merge(rf, on=['Trddt'])
+        ff3_and_rf['Trdmnt'] = ff3_and_rf['Trddt'].str[:6]
+        market_excess = ff3_and_rf.groupby('Trdmnt')['RiskPremium1'].last()
+
+        # 确保市场超额收益率与月度收益率的时间索引对齐
+        market_excess = market_excess.reindex(monthly_ret.index)
+
+        # 初始化结果DataFrame
+        mkt_beta = monthly_ret.copy()
+        mkt_beta.iloc[:, :] = np.nan
+
+        # 对每只股票进行滚动回归
+        for j in range(monthly_ret.shape[1]):
+            stock_ret = monthly_ret.iloc[:, j]
+            valid_idx = ~np.isnan(stock_ret) & ~np.isnan(market_excess)
+
+            for i in range(60, len(monthly_ret)):
+                window_idx = valid_idx.iloc[i - 60:i]
+                if window_idx.sum() >= min_month_num:
+                    y = stock_ret.iloc[i - 60:i][window_idx]
+                    X = market_excess.iloc[i - 60:i][window_idx]
+                    X = sm.add_constant(X)
+
+                    model = sm.OLS(y, X).fit()
+                    mkt_beta.iloc[i, j] = model.params[1]
+
+        return mkt_beta
+
+    def calc_Beta(self):
+        """
+        计算CAPM Beta：
+        Beta = Corr(R_i,excess, R_market,excess) × (σ_i / σ_market)
+        使用日度数据，一年窗口（至少120个观测），相关性使用5年窗口的3日重叠收益率（至少750个观测）
+        """
+        # 获取日度股票收益率
+        daily_ret = self.get_data('TRD_Dalyr', 'Dretwd')
+        # 获取无风险利率
+        rf = self.get_data('TRD_Nrrate', 'Nrrdaydt')
+        # 获取市场收益率（使用综合市场数据）
+        market_ret = self.get_data('TRD_Cndalym', 'Cdretwdeq')
+
+        # 合并数据，统一日期索引
+        rf_dict = dict(zip(rf['Trddt'], rf['Nrrdaydt']))
+        market_dict = dict(zip(market_ret['Trddt'], market_ret['Cdretwdeq']))
+
+        # 计算超额收益率
+        excess_ret = daily_ret.copy()
+        market_excess = []
+
+        for date in daily_ret.index:
+            if date in rf_dict:
+                # 股票超额收益率
+                excess_ret.loc[date] = daily_ret.loc[date] - rf_dict[date]
+                # 市场超额收益率
+                if date in market_dict:
+                    market_excess.append(market_dict[date] - rf_dict[date])
+                else:
+                    market_excess.append(np.nan)
+            else:
+                excess_ret.loc[date] = np.nan
+                market_excess.append(np.nan)
+
+        market_excess = pd.Series(market_excess, index=daily_ret.index)
+
+        # 计算Beta
+        beta_result = excess_ret.copy()
+        beta_result.iloc[:, :] = np.nan
+        beta_result['Trdmnt'] = beta_result.index.str[:6]
+        beta_result.drop_duplicates(subset=['Trdmnt'], keep='last', inplace=True)
+
+        # 滚动计算Beta
+        for i, month_end in enumerate(beta_result.index):
+            # 找到对应的日期位置
+            daily_pos = list(daily_ret.index).index(month_end)
+
+            # 一年窗口（252个交易日）用于计算波动率
+            vol_window = 252
+            min_vol_obs = 120
+
+            # 5年窗口（1260个交易日）用于计算相关性，使用3日重叠收益率
+            corr_window = 1260
+            min_corr_obs = 750
+
+            # 确保有足够的历史数据
+            if daily_pos >= vol_window:
+                # 波动率计算窗口
+                vol_start = max(0, daily_pos - vol_window)
+                vol_end = daily_pos
+
+                # 相关性计算窗口（更长）
+                corr_start = max(0, daily_pos - corr_window)
+                corr_end = daily_pos
+
+                for j in range(beta_result.shape[1] - 1):  # 排除Trdmnt列
+                    # 获取股票和市场的超额收益率
+                    stock_excess = excess_ret.iloc[vol_start:vol_end, j].dropna()
+                    market_excess_vol = market_excess.iloc[vol_start:vol_end].dropna()
+
+                    # 计算波动率（一年窗口）
+                    if len(stock_excess) >= min_vol_obs and len(market_excess_vol) >= min_vol_obs:
+                        # 找到共同的有效日期
+                        common_dates_vol = stock_excess.index.intersection(market_excess_vol.index)
+                        if len(common_dates_vol) >= min_vol_obs:
+                            stock_vol = stock_excess.loc[common_dates_vol].std()
+                            market_vol = market_excess_vol.loc[common_dates_vol].std()
+
+                            # 计算相关性（5年窗口，3日重叠收益率）
+                            stock_excess_long = excess_ret.iloc[corr_start:corr_end, j]
+                            market_excess_long = market_excess.iloc[corr_start:corr_end]
+
+                            # 创建3日重叠收益率
+                            stock_3d = stock_excess_long.rolling(3, min_periods=1).sum()
+                            market_3d = market_excess_long.rolling(3, min_periods=1).sum()
+
+                            # 找到共同的有效观测
+                            valid_mask = ~(stock_3d.isna() | market_3d.isna())
+                            stock_3d_valid = stock_3d[valid_mask]
+                            market_3d_valid = market_3d[valid_mask]
+
+                            if len(stock_3d_valid) >= min_corr_obs:
+                                correlation = stock_3d_valid.corr(market_3d_valid)
+
+                                # 计算Beta
+                                if not np.isnan(correlation) and market_vol != 0:
+                                    beta = correlation * (stock_vol / market_vol)
+                                    beta_result.iloc[i, j] = beta
+
+        beta_result.set_index('Trdmnt', inplace=True)
+        return beta_result
+
+    def calc_SUV(self, trading_day_num=40, min_day_num=20):
+        """
+        计算标准化未解释成交量（SUV）因子：
+        1. 对日度成交量进行回归：Volume = α + β1*|R_positive| + β2*|R_negative| + ε
+        2. 计算未解释成交量：V_actual - V_predicted
+        3. 标准化：(V_actual - V_predicted) / σ_ε
+
+        参数:
+        trading_day_num: 回归窗口长度（默认40个交易日，约2个月）
+        min_day_num: 最少观测数要求（默认20个交易日）
+        """
+        # 获取日度成交量数据（股数）
+        volume = self.get_data('TRD_Dalyr', 'Dnshrtrd')
+        # 获取日度收益率数据
+        daily_ret = self.get_data('TRD_Dalyr', 'Dretwd')
+
+        # 创建结果DataFrame，按月索引
+        suv = daily_ret.copy()
+        suv.iloc[:, :] = np.nan
+        suv['Trdmnt'] = list(suv.index)
+        suv.Trdmnt = suv.Trdmnt.apply(lambda x: x[0:6])
+        suv.drop_duplicates(subset=['Trdmnt'], keep='last', inplace=True)
+
+        # 对每只股票计算SUV
+        for j in range(suv.shape[1] - 1):
+            # 获取当前股票的成交量和收益率序列
+            stock_volume = volume.iloc[:, j]
+            stock_return = daily_ret.iloc[:, j]
+
+            # 创建正收益率和负收益率的绝对值
+            pos_ret_abs = np.where(stock_return > 0, np.abs(stock_return), 0)
+            neg_ret_abs = np.where(stock_return < 0, np.abs(stock_return), 0)
+
+            # 对每个月末计算SUV
+            for m in range(suv.shape[0]):
+                # 确定当前月末在日度数据中的位置
+                month_end_date = suv.index[m]
+                if month_end_date not in daily_ret.index:
+                    continue
+
+                pos = list(daily_ret.index).index(month_end_date)
+
+                # 确保有足够的历史数据
+                if pos < trading_day_num - 1:
+                    continue
+
+                # 提取回归窗口内的数据
+                window_volume = stock_volume[pos - trading_day_num + 1: pos + 1]
+                window_pos_ret = pos_ret_abs[pos - trading_day_num + 1: pos + 1]
+                window_neg_ret = neg_ret_abs[pos - trading_day_num + 1: pos + 1]
+
+                # 去除缺失值
+                valid_mask = ~(np.isnan(window_volume) | np.isnan(window_pos_ret) | np.isnan(window_neg_ret))
+
+                if valid_mask.sum() < min_day_num:
+                    continue
+
+                y = window_volume[valid_mask]
+                x1 = window_pos_ret[valid_mask]
+                x2 = window_neg_ret[valid_mask]
+
+                # 构建回归矩阵 [常数项, |R_positive|, |R_negative|]
+                X = np.column_stack([np.ones(len(y)), x1, x2])
+
+                try:
+                    # 执行最小二乘回归
+                    coeffs = np.linalg.lstsq(X, y, rcond=None)[0]
+
+                    # 计算预测值和残差
+                    y_pred = X @ coeffs
+                    residuals = y - y_pred
+
+                    # 计算残差标准差
+                    residual_std = np.std(residuals, ddof=3)  # 自由度调整：n-k-1，k=2个解释变量
+
+                    if residual_std > 0:
+                        # 计算当前时点的未解释成交量
+                        current_volume = stock_volume[pos]
+                        current_pos_ret = pos_ret_abs[pos]
+                        current_neg_ret = neg_ret_abs[pos]
+
+                        # 预测当前时点的成交量
+                        current_pred = coeffs[0] + coeffs[1] * current_pos_ret + coeffs[2] * current_neg_ret
+
+                        # 计算标准化未解释成交量
+                        unexplained_volume = current_volume - current_pred
+                        suv_value = unexplained_volume / residual_std
+
+                        suv.iloc[m, j] = suv_value
+
+                except (np.linalg.LinAlgError, ValueError):
+                    # 回归失败的情况
+                    continue
+
+        # 设置索引并返回结果
+        suv.set_index('Trdmnt', inplace=True)
+        return suv
 
 
 # end class
@@ -2366,7 +2739,9 @@ total : 118
 # chars_list = characters_copy
 
 # chars_list = ['size',  'turnm', 'turnq', 'turna']
-chars_list = ['AT', 'LME', 'C', 'A2ME','LTurnover', 'ST_Rev', 'Rel2High', 'Variance']
+
+chars_list = ['AT', 'LME', 'C', 'A2ME','LTurnover', 'ST_Rev', 'Rel2High', 'Variance','Spread','LT_Rev','Resid_Var','MktBeta','Beta','SUV']
+
 
 import time
 print(len(chars_list))
